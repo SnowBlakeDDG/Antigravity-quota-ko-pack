@@ -1,0 +1,12 @@
+{
+  "name": "antigravity-ko",
+  "version": "1.0.0",
+  "description": "Portable Korean language pack and patcher for Google Antigravity Desktop (v2.29+)",
+  "private": true,
+  "scripts": {
+    "install-ko": "node tools/patch.js install",
+    "uninstall-ko": "node tools/patch.js uninstall",
+    "status": "node tools/patch.js status",
+    "update-strings": "node tools/update-strings.js"
+  }
+}

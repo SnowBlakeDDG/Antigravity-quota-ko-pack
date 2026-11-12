@@ -907,7 +907,7 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
         const txt = (el.textContent || '').trim();
         if (!txt) continue;
 
-        if (/^(Gemini|Gemini Models|Gemini 모델)$/i.test(txt)) {
+        if (/^(Gemini(?:\s+Models|\s+모델)?)$/i.test(txt)) {
           currentGroup = 'gemini';
           continue;
         }
@@ -915,7 +915,7 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
           currentGroup = 'claude';
           continue;
         }
-        if (/^(Gemini 4 Argon|Argon|Argon 단독 한도|Argon \(단독 한도\))$/i.test(txt)) {
+        if (/^(Gemini\s*4\s*Argon|Argon(?:\s+단독\s*한도|\s*\(단독\s*한도\)|\s+Standalone)?)$/i.test(txt)) {
           currentGroup = 'argon';
           continue;
         }
@@ -925,7 +925,7 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
         if (/argon/i.test(txt) && /(weekly|주간|한도|limit)/i.test(txt)) {
           explicitGroup = 'argon';
           bKey = 'weekly';
-        } else if (/^(Weekly Limit Remaining|Weekly limit|주간 한도|남은 주간 한도|주간 한도 Remaining)$/i.test(txt)) {
+        } else if (/^(Weekly Limit Remaining|Weekly limit|Daily Limit Remaining|Daily limit|주간 한도|남은 주간 한도|일일 한도|남은 일일 한도|주간 한도 Remaining)$/i.test(txt)) {
           bKey = 'weekly';
         } else if (/^(Five Hour Limit Remaining|5-hour limit|5h limit|5시간 한도|남은 5시간 한도|Five Hour Limit)$/i.test(txt)) {
           bKey = 'fiveHour';
@@ -1034,18 +1034,48 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
     return null;
   }
 
-  function findCloseSettingsButton(doc) {
-    const backTestId = doc.querySelector('[data-testid="settings-back-button"], [data-testid="settings-close-button"]');
-    if (backTestId) return backTestId;
-    const btns = doc.querySelectorAll('button');
+  function findSettingsButton(doc) {
+    const byTestId = doc.querySelector('[data-testid="settings-button"]');
+    if (byTestId) return byTestId;
+    const btns = doc.querySelectorAll('button, [role="button"]');
     for (let i = 0; i < btns.length; i++) {
       const b = btns[i];
+      if (b.closest?.('#agy-ko-quota-bar')) continue;
       const txt = (b.textContent || '').trim();
-      if (/^(Back to Agent|Back|에이전트로 돌아가기|돌아가기|뒤로)$/i.test(txt)) {
+      const title = (b.getAttribute('title') || b.getAttribute('aria-label') || '').trim();
+      if (/^(Settings|설정)$/i.test(txt) || /^(Settings|설정)$/i.test(title)) {
         return b;
       }
     }
     return null;
+  }
+
+  function findModelsNavItem(doc) {
+    const byTestId = doc.querySelector('[data-testid="settings-nav-item-Models"]');
+    if (byTestId) return byTestId;
+    const sidebar = doc.querySelector('[data-testid="settings-sidebar"]') || doc;
+    const btns = sidebar.querySelectorAll('button, [role="button"]');
+    for (let i = 0; i < btns.length; i++) {
+      const b = btns[i];
+      const txt = (b.textContent || '').trim();
+      if (/^(Models(?:\s*&\s*Usage)?|모델(?:\s*및\s*사용량)?)$/i.test(txt)) {
+        return b;
+      }
+    }
+    return null;
+  }
+
+  let quotaRefreshTimer = null;
+
+  function finishQuotaRefresh() {
+    if (quotaRefreshTimer) {
+      clearTimeout(quotaRefreshTimer);
+      quotaRefreshTimer = null;
+    }
+    if (isQuotaRefreshing) {
+      isQuotaRefreshing = false;
+      renderQuotaGauges();
+    }
   }
 
   function triggerQuotaRefresh({ silent = false } = {}) {
@@ -1055,6 +1085,16 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
 
     isQuotaRefreshing = true;
     renderQuotaGauges();
+
+    if (quotaRefreshTimer) clearTimeout(quotaRefreshTimer);
+    quotaRefreshTimer = setTimeout(() => {
+      quotaRefreshTimer = null;
+      if (isQuotaRefreshing) {
+        isQuotaRefreshing = false;
+        renderQuotaGauges();
+      }
+    }, 3000);
+
     fetchQuotaFromLocalEndpoint(true);
 
     try {
@@ -1062,76 +1102,19 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
     } catch (_) {}
 
     try {
-      // Check if Settings > Models is already open
-      const existingModelsNav = doc.querySelector('[data-testid="settings-nav-item-Models"]');
-      if (existingModelsNav) {
-        existingModelsNav.click();
-        setTimeout(() => {
-          const refBtn = findModelsRefreshButton(doc);
-          if (refBtn && !refBtn.disabled) refBtn.click();
+      // Only use UI refresh button if the user ALREADY has Settings > Models open
+      const existingModelsNav = findModelsNavItem(doc);
+      if (existingModelsNav && existingModelsNav.offsetParent !== null) {
+        const refBtn = findModelsRefreshButton(doc);
+        if (refBtn && !refBtn.disabled) {
+          refBtn.click();
           setTimeout(() => {
             scrapeQuotaFromDom();
-            isQuotaRefreshing = false;
-            renderQuotaGauges();
+            finishQuotaRefresh();
           }, 550);
-        }, 120);
-        return;
+        }
       }
-
-      const stBtn = doc.querySelector('[data-testid="settings-button"]');
-      if (!stBtn) {
-        isQuotaRefreshing = false;
-        renderQuotaGauges();
-        return;
-      }
-
-      // Temporarily suppress visual flash while performing the background Settings > Models refresh
-      let cloakStyle = null;
-      if (silent) {
-        cloakStyle = doc.createElement('style');
-        cloakStyle.id = 'agy-ko-silent-refresh-cloak';
-        cloakStyle.textContent = `
-          body { pointer-events: none !important; }
-        `;
-        doc.head?.appendChild(cloakStyle);
-      }
-
-      stBtn.click();
-      setTimeout(() => {
-        const modelsNav = doc.querySelector('[data-testid="settings-nav-item-Models"]');
-        if (modelsNav) modelsNav.click();
-
-        setTimeout(() => {
-          const refBtn = findModelsRefreshButton(doc);
-          if (refBtn && !refBtn.disabled) {
-            refBtn.click();
-          }
-          scrapeQuotaFromDom();
-
-          setTimeout(() => {
-            scrapeQuotaFromDom();
-            const closeBtn = findCloseSettingsButton(doc);
-            if (closeBtn) {
-              closeBtn.click();
-            } else {
-              // Dispatch Escape if back button wasn't matched
-              doc.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
-            }
-            if (cloakStyle) cloakStyle.remove();
-            setTimeout(() => {
-              if (enabled && doc.documentElement) walkAndTranslate(doc.documentElement);
-              isQuotaRefreshing = false;
-              renderQuotaGauges();
-            }, 120);
-          }, 520);
-        }, 160);
-      }, 90);
-    } catch (_) {
-      const cloak = doc.getElementById('agy-ko-silent-refresh-cloak');
-      if (cloak) cloak.remove();
-      isQuotaRefreshing = false;
-      renderQuotaGauges();
-    }
+    } catch (_) {}
   }
 
   function installMainWorldQuotaInterceptor() {
@@ -1144,21 +1127,40 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
         if (window.__agyKoQuotaHooked) return;
         window.__agyKoQuotaHooked = true;
         let capturedHeaders = null;
+        let capturedOrigin = '';
         let autoFetched = false;
         const origFetch = window.fetch;
-        const doManualQuotaFetch = (force) => {
-          if (typeof origFetch !== 'function' || !capturedHeaders) return;
-          const qHeaders = Object.assign({}, capturedHeaders, {
+        const doManualQuotaFetch = async (force) => {
+          if (typeof origFetch !== 'function') {
+            window.postMessage({ type: 'AGY_KO_QUOTA_FETCH_DONE' }, '*');
+            return;
+          }
+          const qHeaders = Object.assign({}, capturedHeaders || {}, {
             'Content-Type': 'application/json',
             'Connect-Protocol-Version': '1',
           });
-          origFetch('/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary', {
-            method: 'POST',
-            headers: qHeaders,
-            body: JSON.stringify(force ? { forceRefresh: true } : {}),
-          }).then((r) => (r.ok ? r.json() : null)).then((data) => {
-            if (data) window.postMessage({ type: 'AGY_KO_QUOTA_DATA', payload: data }, '*');
-          }).catch(() => {});
+          const endpoints = [
+            '/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary',
+            '/exa.language_server_pb.LanguageServerService/GetUserQuotaSummary',
+          ];
+          const base = capturedOrigin || '';
+          for (const ep of endpoints) {
+            try {
+              const r = await origFetch(base + ep, {
+                method: 'POST',
+                headers: qHeaders,
+                body: JSON.stringify(force ? { forceRefresh: true } : {}),
+              });
+              if (r && r.ok) {
+                const data = await r.json();
+                if (data) {
+                  window.postMessage({ type: 'AGY_KO_QUOTA_DATA', payload: data }, '*');
+                  break;
+                }
+              }
+            } catch (_) {}
+          }
+          window.postMessage({ type: 'AGY_KO_QUOTA_FETCH_DONE' }, '*');
         };
         window.addEventListener('message', (ev) => {
           if (ev && ev.data && ev.data.type === 'AGY_KO_TRIGGER_QUOTA_FETCH') {
@@ -1171,20 +1173,25 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
               const req = args[0];
               const init = args[1] || {};
               const url = String((req && req.url) || req || '');
-              if (/LanguageServerService/i.test(url) && !capturedHeaders) {
-                const h = {};
-                const srcH = init.headers || (req && req.headers);
-                if (srcH) {
-                  if (typeof srcH.forEach === 'function') {
-                    srcH.forEach((v, k) => { h[k] = v; });
-                  } else if (typeof srcH === 'object') {
-                    Object.assign(h, srcH);
-                  }
+              if (/\\/exa\\.|LanguageServerService|JetskiCortexService/i.test(url)) {
+                if (!capturedOrigin && /^https?:\\/\\/[^/]+/i.test(url)) {
+                  capturedOrigin = url.match(/^(https?:\\/\\/[^/]+)/i)[1];
                 }
-                capturedHeaders = h;
-                if (!autoFetched) {
-                  autoFetched = true;
-                  setTimeout(() => doManualQuotaFetch(false), 300);
+                if (!capturedHeaders) {
+                  const h = {};
+                  const srcH = init.headers || (req && req.headers);
+                  if (srcH) {
+                    if (typeof srcH.forEach === 'function') {
+                      srcH.forEach((v, k) => { h[k] = v; });
+                    } else if (typeof srcH === 'object') {
+                      Object.assign(h, srcH);
+                    }
+                  }
+                  capturedHeaders = h;
+                  if (!autoFetched) {
+                    autoFetched = true;
+                    setTimeout(() => doManualQuotaFetch(false), 300);
+                  }
                 }
               }
             } catch (_) {}
@@ -1200,6 +1207,34 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
             return res;
           };
         }
+        if (typeof window.XMLHttpRequest === 'function') {
+          const origOpen = window.XMLHttpRequest.prototype.open;
+          const origSetHeader = window.XMLHttpRequest.prototype.setRequestHeader;
+          const origSend = window.XMLHttpRequest.prototype.send;
+          window.XMLHttpRequest.prototype.open = function(method, url) {
+            this.__agyUrl = String(url || '');
+            this.__agyHeaders = {};
+            return origOpen.apply(this, arguments);
+          };
+          window.XMLHttpRequest.prototype.setRequestHeader = function(k, v) {
+            if (this.__agyHeaders) this.__agyHeaders[k] = v;
+            return origSetHeader.apply(this, arguments);
+          };
+          window.XMLHttpRequest.prototype.send = function() {
+            if (/\\/exa\\.|LanguageServerService|JetskiCortexService/i.test(this.__agyUrl || '') && !capturedHeaders && this.__agyHeaders) {
+              capturedHeaders = Object.assign({}, this.__agyHeaders);
+            }
+            if (/QuotaSummary/i.test(this.__agyUrl || '')) {
+              this.addEventListener('load', () => {
+                try {
+                  const data = JSON.parse(this.responseText);
+                  window.postMessage({ type: 'AGY_KO_QUOTA_DATA', payload: data }, '*');
+                } catch (_) {}
+              });
+            }
+            return origSend.apply(this, arguments);
+          };
+        }
       })();`;
       doc.head.appendChild(s);
     } catch (_) {}
@@ -1209,6 +1244,9 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
     try {
       if (e?.data?.type === 'AGY_KO_QUOTA_DATA' && e.data.payload) {
         parseQuotaResponseObj(e.data.payload);
+        finishQuotaRefresh();
+      } else if (e?.data?.type === 'AGY_KO_QUOTA_FETCH_DONE') {
+        finishQuotaRefresh();
       }
     } catch (_) {}
   });
@@ -1310,7 +1348,7 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
     try {
       const doc = g.document;
       if (!doc) return;
-      const settingsBtn = doc.querySelector('[data-testid="settings-button"]');
+      const settingsBtn = findSettingsButton(doc);
       if (!settingsBtn || !settingsBtn.parentElement) return;
 
       const parent = settingsBtn.parentElement;
@@ -1478,11 +1516,11 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
           e.stopPropagation();
           hideQuotaFloatingTooltip();
           // Open Settings > Models & Usage on click so user can inspect or refresh full details
-          const stBtn = doc.querySelector('[data-testid="settings-button"]');
+          const stBtn = findSettingsButton(doc);
           if (stBtn) {
             stBtn.click();
             setTimeout(() => {
-              const modelsNav = doc.querySelector('[data-testid="settings-nav-item-Models"]');
+              const modelsNav = findModelsNavItem(doc);
               if (modelsNav) modelsNav.click();
             }, 80);
           }
@@ -1609,6 +1647,23 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
             cur = cur.parentElement;
           }
           break;
+        }
+      }
+
+      // Fallback: locate Appearance section via "Appearance"/"대화 형식" heading + "Theme"/"테마" row
+      if (!appearanceHeaderContainer) {
+        for (let i = 0; i < allDesc.length; i++) {
+          const el = allDesc[i];
+          if (el.childElementCount > 0) continue;
+          const txt = (el.textContent || '').trim();
+          if (txt === 'Appearance' || txt === '대화 형식') {
+            const card = el.closest?.('.agy-card') || el.parentElement?.parentElement;
+            const container = card?.parentElement;
+            if (container && /\b(Theme|테마)\b/.test(container.textContent || '') && /\b(Font|글꼴)\b/.test(container.textContent || '')) {
+              appearanceHeaderContainer = container.firstElementChild || card;
+              break;
+            }
+          }
         }
       }
 

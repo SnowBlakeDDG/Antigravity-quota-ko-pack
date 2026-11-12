@@ -11,10 +11,10 @@
 let fs;
 try { fs = require('original-fs'); } catch { fs = require('fs'); }
 const path = require('path');
-const { resolveAppDir } = require('./patch');
 const { findEmbeddedZip, readEntry } = require('./extract-ui-zip');
 
 function main() {
+  const { resolveAppDir } = require('./patch');
   const rootDir = path.join(__dirname, '..');
   const koPath = path.join(rootDir, 'locales', 'ko.json');
   const customPath = path.join(rootDir, 'locales', 'ko-custom.json');
@@ -111,3 +111,5 @@ function main() {
 if (require.main === module) {
   main();
 }
+
+module.exports = main;

@@ -987,6 +987,18 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
   let isQuotaRefreshing = false;
   let didStartupSilentRefresh = false;
 
+  function getLocalCsrfToken() {
+    try {
+      const ls = g.localStorage?.getItem('agy_session_csrf_token');
+      if (ls) return ls;
+    } catch (_) {}
+    try {
+      const m = (g.document?.cookie || '').split('; ').find((c) => c.startsWith('csrfToken='));
+      if (m) return m.split('=').slice(1).join('=');
+    } catch (_) {}
+    return '';
+  }
+
   function fetchQuotaFromLocalEndpoint(force = false) {
     const now = Date.now();
     if (!force && now - lastQuotaFetchAttempt < 15000) return;
@@ -995,6 +1007,12 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
       if (typeof g.fetch !== 'function') return;
       const origin = g.location?.origin || '';
       if (!origin.startsWith('http')) return;
+      const csrf = getLocalCsrfToken();
+      const headers = {
+        'Content-Type': 'application/json',
+        'Connect-Protocol-Version': '1',
+      };
+      if (csrf) headers['x-codeium-csrf-token'] = csrf;
       const endpoints = [
         '/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary',
         '/exa.language_server_pb.LanguageServerService/GetUserQuotaSummary',
@@ -1002,10 +1020,8 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
       for (const ep of endpoints) {
         g.fetch(origin + ep, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Connect-Protocol-Version': '1',
-          },
+          credentials: 'include',
+          headers,
           body: JSON.stringify(force ? { forceRefresh: true } : {}),
         })
           .then((r) => (r.ok ? r.json() : null))
@@ -1120,7 +1136,8 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
   function installMainWorldQuotaInterceptor() {
     try {
       const doc = g.document;
-      if (!doc?.head || doc.getElementById('agy-ko-quota-hook')) return;
+      const mountTarget = doc?.head || doc?.documentElement;
+      if (!mountTarget || doc.getElementById('agy-ko-quota-hook')) return;
       const s = doc.createElement('script');
       s.id = 'agy-ko-quota-hook';
       s.textContent = `(() => {
@@ -1128,17 +1145,99 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
         window.__agyKoQuotaHooked = true;
         let capturedHeaders = null;
         let capturedOrigin = '';
+        let activeWs = null;
+        let capturedWsUrl = '';
+        let capturedWsHeaders = null;
+        let capturedQuotaProcedure = '/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary';
         let autoFetched = false;
+        const quotaStreams = new Set();
+        const manualStreams = new Set();
+        const hookedSockets = new WeakSet();
         const origFetch = window.fetch;
-        const doManualQuotaFetch = async (force) => {
-          if (typeof origFetch !== 'function') {
-            window.postMessage({ type: 'AGY_KO_QUOTA_FETCH_DONE' }, '*');
-            return;
+        const origWs = window.WebSocket;
+        const origWsSend = origWs && origWs.prototype && origWs.prototype.send;
+
+        const getCsrf = () => {
+          try {
+            if (window.__APP_CONFIG__ && window.__APP_CONFIG__.csrfToken) return window.__APP_CONFIG__.csrfToken;
+          } catch (_) {}
+          try {
+            const ls = window.localStorage && window.localStorage.getItem('agy_session_csrf_token');
+            if (ls) return ls;
+          } catch (_) {}
+          try {
+            const m = (document.cookie || '').split('; ').find((c) => c.startsWith('csrfToken='));
+            if (m) return m.split('=').slice(1).join('=');
+          } catch (_) {}
+          return '';
+        };
+
+        const attachWsListener = (ws) => {
+          if (!ws || hookedSockets.has(ws)) return;
+          hookedSockets.add(ws);
+          ws.addEventListener('message', (ev) => {
+            try {
+              if (typeof ev.data !== 'string') return;
+              const msg = JSON.parse(ev.data);
+              if (!msg || !msg.streamId) return;
+              if (msg.type === 'data' && msg.payload) {
+                const isQuota = quotaStreams.has(msg.streamId) || manualStreams.has(msg.streamId) || Boolean(msg.payload?.response?.groups);
+                if (isQuota) {
+                  window.postMessage({ type: 'AGY_KO_QUOTA_DATA', payload: msg.payload }, '*');
+                }
+              } else if (msg.type === 'end') {
+                quotaStreams.delete(msg.streamId);
+                if (manualStreams.has(msg.streamId)) {
+                  manualStreams.delete(msg.streamId);
+                  window.postMessage({ type: 'AGY_KO_QUOTA_FETCH_DONE' }, '*');
+                }
+              }
+            } catch (_) {}
+          });
+        };
+
+        const genStreamId = () => {
+          try {
+            if (typeof crypto === 'object' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+          } catch (_) {}
+          return 'agy-ko-q-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+        };
+
+        const buildWsHeaders = () => {
+          const h = Object.assign({}, capturedWsHeaders || {});
+          h['Content-Type'] = ['application/json'];
+          const csrf = getCsrf();
+          if (csrf && !h['x-codeium-csrf-token']) {
+            h['x-codeium-csrf-token'] = [csrf];
           }
+          return h;
+        };
+
+        const sendQuotaOverWs = (ws, force) => {
+          const sid = genStreamId();
+          manualStreams.add(sid);
+          const frame = JSON.stringify({
+            streamId: sid,
+            type: 'start',
+            procedure: capturedQuotaProcedure || '/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary',
+            stream: false,
+            headers: buildWsHeaders(),
+            payload: force ? { forceRefresh: true } : {},
+          });
+          origWsSend.call(ws, frame);
+          return sid;
+        };
+
+        const doHttpQuotaFetch = async (force) => {
+          if (typeof origFetch !== 'function') return false;
+          const csrf = getCsrf();
           const qHeaders = Object.assign({}, capturedHeaders || {}, {
             'Content-Type': 'application/json',
             'Connect-Protocol-Version': '1',
           });
+          if (csrf && !qHeaders['x-codeium-csrf-token']) {
+            qHeaders['x-codeium-csrf-token'] = csrf;
+          }
           const endpoints = [
             '/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary',
             '/exa.language_server_pb.LanguageServerService/GetUserQuotaSummary',
@@ -1148,6 +1247,7 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
             try {
               const r = await origFetch(base + ep, {
                 method: 'POST',
+                credentials: 'include',
                 headers: qHeaders,
                 body: JSON.stringify(force ? { forceRefresh: true } : {}),
               });
@@ -1155,13 +1255,112 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
                 const data = await r.json();
                 if (data) {
                   window.postMessage({ type: 'AGY_KO_QUOTA_DATA', payload: data }, '*');
-                  break;
+                  return true;
                 }
               }
             } catch (_) {}
           }
-          window.postMessage({ type: 'AGY_KO_QUOTA_FETCH_DONE' }, '*');
+          return false;
         };
+
+        const doManualQuotaFetch = async (force) => {
+          let wsDone = false;
+          try {
+            if (activeWs && activeWs.readyState === 1 && origWsSend) {
+              attachWsListener(activeWs);
+              sendQuotaOverWs(activeWs, force);
+              wsDone = true;
+            } else if (origWs && origWsSend && (capturedWsUrl || /^https?:/i.test(location.protocol))) {
+              const wsUrl = capturedWsUrl || ((location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/connect-websocket');
+              wsDone = await new Promise((resolve) => {
+                let settled = false;
+                let tmpWs = null;
+                const done = (ok) => {
+                  if (settled) return;
+                  settled = true;
+                  try { if (tmpWs && tmpWs.readyState <= 1) tmpWs.close(); } catch (_) {}
+                  resolve(ok);
+                };
+                const timer = setTimeout(() => done(false), 2500);
+                try {
+                  tmpWs = new origWs(wsUrl);
+                  tmpWs.addEventListener('open', () => {
+                    try {
+                      const sid = sendQuotaOverWs(tmpWs, force);
+                      tmpWs.addEventListener('message', (ev) => {
+                        try {
+                          const msg = JSON.parse(ev.data);
+                          if (msg && msg.streamId === sid && msg.type === 'data' && msg.payload) {
+                            window.postMessage({ type: 'AGY_KO_QUOTA_DATA', payload: msg.payload }, '*');
+                          } else if (msg && msg.streamId === sid && msg.type === 'end') {
+                            clearTimeout(timer);
+                            done(true);
+                          }
+                        } catch (_) {}
+                      });
+                    } catch (_) {
+                      clearTimeout(timer);
+                      done(false);
+                    }
+                  });
+                  tmpWs.addEventListener('error', () => { clearTimeout(timer); done(false); });
+                } catch (_) {
+                  clearTimeout(timer);
+                  done(false);
+                }
+              });
+            }
+          } catch (_) {}
+          if (!wsDone) {
+            await doHttpQuotaFetch(force);
+            window.postMessage({ type: 'AGY_KO_QUOTA_FETCH_DONE' }, '*');
+          }
+        };
+
+        if (origWs && origWsSend) {
+          origWs.prototype.send = function(data) {
+            try {
+              if (typeof data === 'string' && data.charCodeAt(0) === 123) {
+                const msg = JSON.parse(data);
+                if (msg && msg.type === 'start' && msg.procedure) {
+                  if (/connect-websocket/i.test(this.url || '') || /\\/exa\\./i.test(msg.procedure)) {
+                    activeWs = this;
+                    if (this.url) capturedWsUrl = this.url;
+                    if (msg.headers) capturedWsHeaders = msg.headers;
+                    attachWsListener(this);
+                    if (/QuotaSummary/i.test(msg.procedure)) {
+                      capturedQuotaProcedure = msg.procedure;
+                      if (msg.streamId) quotaStreams.add(msg.streamId);
+                    }
+                    if (!autoFetched) {
+                      autoFetched = true;
+                      setTimeout(() => doManualQuotaFetch(false), 300);
+                    }
+                  }
+                }
+              }
+            } catch (_) {}
+            return origWsSend.apply(this, arguments);
+          };
+          const WrappedWs = function(url, protocols) {
+            const ws = protocols !== undefined ? new origWs(url, protocols) : new origWs(url);
+            try {
+              if (/connect-websocket/i.test(String(url || ''))) {
+                activeWs = ws;
+                capturedWsUrl = String(url);
+                attachWsListener(ws);
+              }
+            } catch (_) {}
+            return ws;
+          };
+          WrappedWs.prototype = origWs.prototype;
+          Object.setPrototypeOf(WrappedWs, origWs);
+          for (const k of ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED']) {
+            try { WrappedWs[k] = origWs[k]; } catch (_) {}
+          }
+          window.WebSocket = WrappedWs;
+        }
+
         window.addEventListener('message', (ev) => {
           if (ev && ev.data && ev.data.type === 'AGY_KO_TRIGGER_QUOTA_FETCH') {
             doManualQuotaFetch(true);
@@ -1236,7 +1435,7 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
           };
         }
       })();`;
-      doc.head.appendChild(s);
+      mountTarget.appendChild(s);
     } catch (_) {}
   }
 
@@ -1942,8 +2141,10 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
     fetchQuotaFromLocalEndpoint();
   }
 
+  installMainWorldQuotaInterceptor();
   ensureObserverAttached();
   g.document.addEventListener?.('DOMContentLoaded', () => {
+    installMainWorldQuotaInterceptor();
     ensureObserverAttached();
     try { ipcRenderer?.send?.('ko:renderer-ready', { version, enabled }); } catch (_) {}
   });

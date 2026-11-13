@@ -14,9 +14,9 @@ Antigravity가 새 버전으로 자동 업데이트되면 `resources/app.asar`�
 ---
 
 ## 2. 쿼타 게이지 & 무소음 리프레시 (`src/ko-i18n.js`)
-- **설정 창 팝업 제거**: `triggerQuotaRefresh()`는 더 이상 `Settings` 창을 열었다 닫지 않습니다.
-  - 메인 월드(`installMainWorldQuotaInterceptor`)에서 `window.fetch` 및 `XMLHttpRequest`를 후킹해 `exa.*` / `LanguageServerService` / `JetskiCortexService` 요청의 헤더와 오리진을 캡처합니다.
-  - 리프레시 시 백그라운드에서 직접 `/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary`(폴백: `GetUserQuotaSummary`)를 호출하여 응답을 파싱합니다.
+- **설정 창 팝업 제거 및 WebSocket RPC 직접 호출**: `triggerQuotaRefresh()`는 더 이상 `Settings` 창을 열었다 닫지 않습니다.
+  - Antigravity v2.31+의 `Jetski Web` UI는 Connect-RPC 요청을 `fetch`가 아닌 다중화 **`WebSocket` (`/connect-websocket`)** 으로 전송하며, 인증 헤더로 **`x-codeium-csrf-token`** (`window.__APP_CONFIG__.csrfToken` / `agy_session_csrf_token` / `csrfToken` 쿠키)을 요구합니다.
+  - `installMainWorldQuotaInterceptor()`는 `window.WebSocket` 및 `WebSocket.prototype.send`를 후킹해 활성 WebSocket 연결과 인증 헤더를 즉시 캡처하고, 리프레시 시 해당 WebSocket(또는 신규 `/connect-websocket` 연결 및 `x-codeium-csrf-token` 포함 HTTP `fetch` 폴백)으로 `/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary` 프레임을 직접 전송합니다.
   - 사용자가 이미 `Settings > Models` 화면을 열어둔 경우에만 화면 내 새로고침 버튼 클릭 및 DOM 스크래핑을 병행합니다.
 - **다중 폴백 셀렉터**:
   - `findSettingsButton()`, `findModelsNavItem()`, `ensureSettingsLanguageRow()` 모두 `data-testid` 외에 텍스트·라벨·섹션 구조 기반 폴백을 갖추어 소규모 마크업 변경에 내성을 갖습니다.

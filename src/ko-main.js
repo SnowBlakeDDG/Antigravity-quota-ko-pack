@@ -185,6 +185,94 @@ function installMainLocalization() {
     }
   }
 
+  // 4. Auto-repatch watcher when Antigravity installs an update (Windows/cross-platform)
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const { spawn } = require('child_process');
+    let updatePending = false;
+    let repatchScheduled = false;
+
+    function loadPackMeta() {
+      try {
+        const metaPath = path.join(__dirname, 'ko-meta.json');
+        if (fs.existsSync(metaPath)) return JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+      } catch (_) {}
+      return null;
+    }
+
+    function schedulePostUpdateRepatch() {
+      if (repatchScheduled) return;
+      repatchScheduled = true;
+      const meta = loadPackMeta();
+      if (!meta || !meta.packRoot || !meta.appDir) return;
+      const patchJs = path.join(meta.packRoot, 'tools', 'patch.js');
+      const asarPath = path.join(meta.appDir, 'resources', 'app.asar');
+      const agyExe = path.join(meta.appDir, 'Antigravity.exe');
+      if (!fs.existsSync(patchJs) || !fs.existsSync(asarPath)) return;
+
+      if (process.platform === 'win32') {
+        const esc = (s) => String(s).replace(/'/g, "''");
+        const psScript = [
+          `$asar = '${esc(asarPath)}'`,
+          `$exe = '${esc(agyExe)}'`,
+          `$patch = '${esc(patchJs)}'`,
+          `$dir = '${esc(meta.appDir)}'`,
+          'for ($i = 0; $i -lt 90; $i++) {',
+          '  Start-Sleep -Seconds 2',
+          '  try {',
+          '    $fs = [System.IO.File]::OpenRead($asar)',
+          '    try {',
+          '      $lenBuf = New-Object byte[] 16',
+          '      $null = $fs.Read($lenBuf, 0, 16)',
+          '      $hdrSize = [System.BitConverter]::ToInt32($lenBuf, 12)',
+          '      if ($hdrSize -gt 0 -and $hdrSize -lt 10485760) {',
+          '        $hdrBuf = New-Object byte[] $hdrSize',
+          '        $null = $fs.Read($hdrBuf, 0, $hdrSize)',
+          '        $hdrStr = [System.Text.Encoding]::UTF8.GetString($hdrBuf)',
+          '        if ($hdrStr -notmatch "ko-meta\\.json") {',
+          '          $fs.Dispose()',
+          '          Start-Sleep -Seconds 2',
+          '          $env:ELECTRON_RUN_AS_NODE = "1"',
+          '          & $exe $patch ensure --quiet --app-dir $dir',
+          '          break',
+          '        }',
+          '      }',
+          '    } finally { $fs.Dispose() }',
+          '  } catch {}',
+          '}',
+        ].join('; ');
+        const child = spawn('powershell.exe', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', psScript], {
+          detached: true,
+          stdio: 'ignore',
+        });
+        child.unref();
+      } else {
+        const shScript = `for i in $(seq 1 90); do sleep 2; if ! grep -q "AGY_KO_PATCH_START" "${asarPath}" 2>/dev/null; then sleep 2; ELECTRON_RUN_AS_NODE=1 "${process.execPath}" "${patchJs}" ensure --quiet --app-dir "${meta.appDir}"; break; fi; done`;
+        const child = spawn('sh', ['-c', shScript], { detached: true, stdio: 'ignore' });
+        child.unref();
+      }
+    }
+
+    try {
+      const eu = require('electron-updater');
+      if (eu && eu.autoUpdater) {
+        eu.autoUpdater.on?.('update-downloaded', () => { updatePending = true; });
+        if (typeof eu.autoUpdater.quitAndInstall === 'function') {
+          const origQai = eu.autoUpdater.quitAndInstall.bind(eu.autoUpdater);
+          eu.autoUpdater.quitAndInstall = function (...args) {
+            schedulePostUpdateRepatch();
+            return origQai(...args);
+          };
+        }
+      }
+    } catch (_) {}
+
+    electron.app?.on?.('will-quit', () => {
+      if (updatePending) schedulePostUpdateRepatch();
+    });
+  } catch (_) {}
+
   console.log(`[AGY-KO] Main localization hook installed (dict=${rawDict.version})`);
 }
 

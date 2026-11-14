@@ -3,9 +3,10 @@
 ## 1. 버전 업데이트 대응 구조 (v2.31.2+)
 Antigravity가 새 버전으로 자동 업데이트되면 `resources/app.asar`가 순정 아카이브로 교체되면서 패치가 해제될 수 있습니다. 이를 방지하고 최소한의 수동 개입으로 유지되도록 다음 구조가 적용되어 있습니다.
 
-### 자동 복구 (`ensure` & 시작프로그램 등록)
+### 자동 복구 (`ensure` & 이중 자동 재패치)
 - **`node tools/patch.js ensure`**: 현재 `app.asar`의 패치 여부를 확인하고, 해제되어 있으면 `update-strings` 병합 후 자동으로 재설치합니다. 이미 패치되어 있으면 아무 작업도 하지 않습니다.
-- **`node tools/patch.js enable-autopatch`** (Windows): `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\AgyQuotaKoAutoPatch.vbs`를 등록해 로그인 시 백그라운드로 `ensure --quiet`를 실행합니다. (해제: `disable-autopatch`)
+- **`src/ko-main.js` 업데이트 직후 자동 복구**: 패치된 상태에서 `electron-updater`가 업데이트를 다운로드하고 재시작(`quitAndInstall` / `will-quit`)할 때, 분리된 백그라운드 감시자가 새 `app.asar` 교체를 감지해 즉시 `ensure --quiet`를 실행합니다.
+- **`node tools/patch.js enable-autopatch`** (Windows): 로그인 시 실행되는 시작프로그램(`AgyQuotaKoAutoPatch.vbs`)과 함께 **5분 주기 비관리자 작업 스케줄러(`AgyQuotaKoAutoPatch`)**를 등록해, 어떤 경로로 업데이트되더라도 재부팅 없이 자동 복구됩니다. (해제: `disable-autopatch`)
 
 ### 버전 무관 ASAR 훅 앵커 (`tools/patch.js`)
 - **`patchMainJs`**: `Object.assign(console, ...)` → `require("electron")` / `__importStar(require("electron"))` 정규식 → `"use strict";` 직후 순으로 폴백 삽입합니다.

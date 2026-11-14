@@ -184,12 +184,15 @@ function install(appDir) {
   const compactDictJson = JSON.stringify(koDictObj);
   const koDictBuf = Buffer.from(compactDictJson, 'utf8');
 
+  const metaBuf = Buffer.from(JSON.stringify({ packRoot: rootDir, appDir }), 'utf8');
+
   const replacements = new Map([
     ['dist/main.js', Buffer.from(patchMainJs(origMain), 'utf8')],
     ['dist/preload.js', Buffer.from(patchPreloadJs(origPreload, compactDictJson), 'utf8')],
     ['dist/ko-i18n.js', koI18nBuf],
     ['dist/ko-main.js', koMainBuf],
     ['dist/ko-dict.json', koDictBuf],
+    ['dist/ko-meta.json', metaBuf],
   ]);
 
   const stagedPath = asarPath + '.ko-staged';
@@ -229,12 +232,14 @@ function buildStaged(appDir, outFile) {
   const rootDir = path.join(__dirname, '..');
   const koDictObj = JSON.parse(fs.readFileSync(path.join(rootDir, 'locales', 'ko.json'), 'utf8'));
   const compactDictJson = JSON.stringify(koDictObj);
+  const metaBuf = Buffer.from(JSON.stringify({ packRoot: rootDir, appDir }), 'utf8');
   const replacements = new Map([
     ['dist/main.js', Buffer.from(patchMainJs(origMain), 'utf8')],
     ['dist/preload.js', Buffer.from(patchPreloadJs(origPreload, compactDictJson), 'utf8')],
     ['dist/ko-i18n.js', fs.readFileSync(path.join(rootDir, 'src', 'ko-i18n.js'))],
     ['dist/ko-main.js', fs.readFileSync(path.join(rootDir, 'src', 'ko-main.js'))],
     ['dist/ko-dict.json', Buffer.from(compactDictJson, 'utf8')],
+    ['dist/ko-meta.json', metaBuf],
   ]);
   asar.repack(baseArchive, outFile, replacements);
   console.log(`[빌드 완료] 패치된 아카이브 생성됨: ${outFile}`);
@@ -292,15 +297,19 @@ function setupAutoPatchWindows(enable, appDir) {
     console.log('[안내] 자동 복구 작업 등록은 현재 Windows만 지원합니다.');
     return;
   }
+  const { execFileSync } = require('child_process');
+  const taskName = 'AgyQuotaKoAutoPatch';
   const appData = process.env.APPDATA || path.join(process.env.USERPROFILE || '', 'AppData', 'Roaming');
   const startupDir = path.join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
   const startupVbs = path.join(startupDir, 'AgyQuotaKoAutoPatch.vbs');
   if (!enable) {
+    try {
+      execFileSync('schtasks', ['/Delete', '/TN', taskName, '/F'], { stdio: 'pipe' });
+      console.log(`[해제 완료] 주기적 자동 복구 작업(${taskName})을 제거했습니다.`);
+    } catch (_) {}
     if (fs.existsSync(startupVbs)) {
       fs.unlinkSync(startupVbs);
       console.log(`[해제 완료] 시작프로그램 자동 복구 스크립트를 제거했습니다: ${startupVbs}`);
-    } else {
-      console.log('[안내] 등록된 자동 복구 스크립트가 없습니다.');
     }
     return;
   }
@@ -317,7 +326,20 @@ function setupAutoPatchWindows(enable, appDir) {
   ].join('\r\n');
   fs.mkdirSync(startupDir, { recursive: true });
   fs.writeFileSync(startupVbs, vbsContent, 'utf8');
-  console.log(`[등록 완료] Windows 로그인 시 패치 자동 복구 스크립트가 등록되었습니다: ${startupVbs}`);
+  console.log(`[등록 완료] Windows 로그인 시 패치 자동 복구 스크립트 등록됨: ${startupVbs}`);
+  try {
+    execFileSync('schtasks', [
+      '/Create',
+      '/TN', taskName,
+      '/TR', `wscript.exe //B "${startupVbs}"`,
+      '/SC', 'MINUTE',
+      '/MO', '5',
+      '/F',
+    ], { stdio: 'inherit' });
+    console.log(`[등록 완료] 5분 주기 자동 복구 작업(${taskName})이 등록되었습니다.`);
+  } catch (e) {
+    console.warn(`[경고] 주기적 작업 등록 실패(시작프로그램은 정상 등록됨): ${e.message}`);
+  }
 }
 
 function main() {
@@ -367,8 +389,8 @@ function main() {
   }
 }
 
+module.exports = { resolveAppDir, getAsarPaths, checkStatus, install, ensure, uninstall, buildStaged };
+
 if (require.main === module) {
   main();
 }
-
-module.exports = { resolveAppDir, getAsarPaths, checkStatus, install, ensure, uninstall, buildStaged };

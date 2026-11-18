@@ -5,8 +5,18 @@ Antigravity가 새 버전으로 자동 업데이트되면 `resources/app.asar`�
 
 ### 자동 복구 (`ensure` & 이중 자동 재패치)
 - **`node tools/patch.js ensure`**: 현재 `app.asar`의 패치 여부를 확인하고, 해제되어 있으면 `update-strings` 병합 후 자동으로 재설치합니다. 이미 패치되어 있으면 아무 작업도 하지 않습니다.
-- **`src/ko-main.js` 업데이트 직후 자동 복구**: 패치된 상태에서 `electron-updater`가 업데이트를 다운로드하고 재시작(`quitAndInstall` / `will-quit`)할 때, 분리된 백그라운드 감시자가 새 `app.asar` 교체를 감지해 즉시 `ensure --quiet`를 실행합니다.
+- **`src/ko-main.js` 업데이트 직후 무패치 부팅 방지 (`-EncodedCommand` + `--force-run` 억제)**:
+  - `electron-updater`의 `NsisUpdater`는 업데이트 시 `--updated --force-run`으로 새 버전을 즉시 재실행해 패치보다 먼저 무패치 `app.asar`가 메모리에 로드될 수 있습니다.
+  - 이를 방지하기 위해 `ko-main.js`에서 `autoRunAppAfterInstall = false` 및 `quitAndInstall(isSilent, false)`로 NSIS의 즉시 재실행을 억제하고, Base64 `-EncodedCommand` 기반 숨김 PowerShell 감시자가 `FileShare.ReadWrite | Delete`로 `app.asar` 교체 및 인스톨러 종료를 감지한 뒤 **`ensure --quiet`를 먼저 완료하고 새 버전을 실행**합니다.
 - **`node tools/patch.js enable-autopatch`** (Windows): 로그인 시 실행되는 시작프로그램(`AgyQuotaKoAutoPatch.vbs`)과 함께 **5분 주기 비관리자 작업 스케줄러(`AgyQuotaKoAutoPatch`)**를 등록해, 어떤 경로로 업데이트되더라도 재부팅 없이 자동 복구됩니다. (해제: `disable-autopatch`)
+
+### Antigravity 내부 구조 및 장기 업데이트 방향성 메모
+- **앱 분리 구조 (`Antigravity Hub` + `language_server.exe`)**:
+  - Electron 셸(`resources/app.asar`, `dist/main.js`, `dist/preload.js`)은 얇은 호스트 역할(`electron-updater`, `chrome-devtools-mcp`, `@connectrpc/connect`, 원격 SSH/WSL/브라우저 뷰 제어)만 담당하며, 실제 UI(`Jetski Web`)는 `resources/bin/language_server.exe` 내장 ZIP에서 로컬 HTTPS + WebSocket(`/connect-websocket`)으로 서빙됩니다.
+  - `dist/ideInstall/constants.js`에 `Antigravity IDE`와 `Antigravity Hub` 업데이터 엔드포인트가 분리되어 있어, 향후에도 Hub 앱은 `electron-updater`(`NsisUpdater`)를 통해 짧은 주기로 전체 패키지를 교체하는 방식으로 업데이트될 가능성이 높습니다.
+- **Electron Fuse 상태 감시 (`lib/fuses.js`)**:
+  - 현재(`v2.32.2`) `Antigravity.exe`는 `EnableEmbeddedAsarIntegrityValidation: off`, `OnlyLoadAppFromAsar: off`, `RunAsNode: on`, `EnableNodeOptionsEnvironmentVariable: on` 상태입니다.
+  - `tools/patch.js status`가 `EnableEmbeddedAsarIntegrityValidation` 상태를 함께 검사하므로, 향후 버전에서 무결성 검증 Fuse가 켜질 경우 즉시 감지할 수 있습니다.
 
 ### 버전 무관 ASAR 훅 앵커 (`tools/patch.js`)
 - **`patchMainJs`**: `Object.assign(console, ...)` → `require("electron")` / `__importStar(require("electron"))` 정규식 → `"use strict";` 직후 순으로 폴백 삽입합니다.

@@ -12,6 +12,7 @@ let fs;
 try { fs = require('original-fs'); } catch { fs = require('fs'); }
 const path = require('path');
 const asar = require('../lib/asar');
+const { readFuses } = require('../lib/fuses');
 
 const PATCH_MARKER = '/* AGY_KO_PATCH_START */';
 
@@ -84,10 +85,23 @@ function checkStatus(asarPath, backupPath) {
         };
       } catch (_) {}
     }
+    let fuseWarn = null;
+    try {
+      const exeCand = process.platform === 'win32'
+        ? path.join(path.dirname(path.dirname(asarPath)), 'Antigravity.exe')
+        : null;
+      if (exeCand && fs.existsSync(exeCand)) {
+        const fuses = readFuses(exeCand);
+        if (fuses && fuses.EnableEmbeddedAsarIntegrityValidation === 'on') {
+          fuseWarn = 'ASAR integrity validation fuse is ON';
+        }
+      }
+    } catch (_) {}
     return {
       installed: isPatched,
       appVersion: pkg.version,
       hasBackup: fs.existsSync(backupPath),
+      ...(fuseWarn ? { fuseWarning: fuseWarn } : {}),
       ...dictInfo,
     };
   } catch (err) {

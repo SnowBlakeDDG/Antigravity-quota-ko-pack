@@ -201,7 +201,7 @@ function installMainLocalization() {
       return null;
     }
 
-    function schedulePostUpdateRepatch() {
+    function schedulePostUpdateRepatch(relaunchAfterPatch = false) {
       if (repatchScheduled) return;
       repatchScheduled = true;
       const meta = loadPackMeta();
@@ -213,15 +213,19 @@ function installMainLocalization() {
 
       if (process.platform === 'win32') {
         const esc = (s) => String(s).replace(/'/g, "''");
+        const relaunchLine = relaunchAfterPatch
+          ? 'if (-not (Get-Process -Name "Antigravity" -ErrorAction SilentlyContinue)) { Start-Process -FilePath $exe }'
+          : '';
         const psScript = [
           `$asar = '${esc(asarPath)}'`,
           `$exe = '${esc(agyExe)}'`,
           `$patch = '${esc(patchJs)}'`,
           `$dir = '${esc(meta.appDir)}'`,
-          'for ($i = 0; $i -lt 90; $i++) {',
-          '  Start-Sleep -Seconds 2',
+          'for ($i = 0; $i -lt 240; $i++) {',
+          '  Start-Sleep -Milliseconds 500',
+          '  $unpatched = $false',
           '  try {',
-          '    $fs = [System.IO.File]::OpenRead($asar)',
+          '    $fs = [System.IO.File]::Open($asar, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)',
           '    try {',
           '      $lenBuf = New-Object byte[] 16',
           '      $null = $fs.Read($lenBuf, 0, 16)',
@@ -230,25 +234,32 @@ function installMainLocalization() {
           '        $hdrBuf = New-Object byte[] $hdrSize',
           '        $null = $fs.Read($hdrBuf, 0, $hdrSize)',
           '        $hdrStr = [System.Text.Encoding]::UTF8.GetString($hdrBuf)',
-          '        if ($hdrStr -notmatch "ko-meta\\.json") {',
-          '          $fs.Dispose()',
-          '          Start-Sleep -Seconds 2',
-          '          $env:ELECTRON_RUN_AS_NODE = "1"',
-          '          & $exe $patch ensure --quiet --app-dir $dir',
-          '          break',
-          '        }',
+          '        if ($hdrStr -notmatch "ko-meta\\.json") { $unpatched = $true }',
           '      }',
           '    } finally { $fs.Dispose() }',
           '  } catch {}',
+          '  if ($unpatched) {',
+          '    for ($w = 0; $w -lt 40; $w++) {',
+          '      if (-not (Get-Process -Name "Antigravity-x64*" -ErrorAction SilentlyContinue)) { break }',
+          '      Start-Sleep -Milliseconds 250',
+          '    }',
+          '    Start-Sleep -Milliseconds 300',
+          '    $env:ELECTRON_RUN_AS_NODE = "1"',
+          '    $p = Start-Process -FilePath $exe -ArgumentList @($patch, "ensure", "--quiet", "--app-dir", $dir) -Wait -PassThru -WindowStyle Hidden',
+          relaunchLine,
+          '    break',
+          '  }',
           '}',
-        ].join('; ');
-        const child = spawn('powershell.exe', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', psScript], {
+        ].filter(Boolean).join('\n');
+        const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
+        const child = spawn('powershell.exe', ['-NoProfile', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], {
           detached: true,
           stdio: 'ignore',
+          windowsHide: true,
         });
         child.unref();
       } else {
-        const shScript = `for i in $(seq 1 90); do sleep 2; if ! grep -q "AGY_KO_PATCH_START" "${asarPath}" 2>/dev/null; then sleep 2; ELECTRON_RUN_AS_NODE=1 "${process.execPath}" "${patchJs}" ensure --quiet --app-dir "${meta.appDir}"; break; fi; done`;
+        const shScript = `for i in $(seq 1 120); do sleep 1; if ! grep -q "AGY_KO_PATCH_START" "${asarPath}" 2>/dev/null; then sleep 1; ELECTRON_RUN_AS_NODE=1 "${process.execPath}" "${patchJs}" ensure --quiet --app-dir "${meta.appDir}"; break; fi; done`;
         const child = spawn('sh', ['-c', shScript], { detached: true, stdio: 'ignore' });
         child.unref();
       }
@@ -258,18 +269,20 @@ function installMainLocalization() {
       const eu = require('electron-updater');
       if (eu && eu.autoUpdater) {
         eu.autoUpdater.on?.('update-downloaded', () => { updatePending = true; });
+        try { eu.autoUpdater.autoRunAppAfterInstall = false; } catch (_) {}
         if (typeof eu.autoUpdater.quitAndInstall === 'function') {
           const origQai = eu.autoUpdater.quitAndInstall.bind(eu.autoUpdater);
-          eu.autoUpdater.quitAndInstall = function (...args) {
-            schedulePostUpdateRepatch();
-            return origQai(...args);
+          eu.autoUpdater.quitAndInstall = function (isSilent, _isForceRunAfter) {
+            schedulePostUpdateRepatch(true);
+            try { eu.autoUpdater.autoRunAppAfterInstall = false; } catch (_) {}
+            return origQai(Boolean(isSilent), false);
           };
         }
       }
     } catch (_) {}
 
     electron.app?.on?.('will-quit', () => {
-      if (updatePending) schedulePostUpdateRepatch();
+      if (updatePending) schedulePostUpdateRepatch(false);
     });
   } catch (_) {}
 

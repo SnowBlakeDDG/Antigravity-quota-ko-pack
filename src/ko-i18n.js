@@ -776,10 +776,12 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
 
   // --- ChatGPT-style Dual-Arc Model Quota Gauges (Gemini / Claude / Argon) ---
   const QUOTA_CACHE_KEY = 'agy_ko_quota_summary_v2';
+  const QUOTA_GROUPS_SNAP_KEY = 'agy_ko_quota_groups_snapshot_v1';
   let quotaState = {
     gemini: { fiveHour: null, weekly: null },
     claude: { fiveHour: null, weekly: null },
     argon: { fiveHour: null, weekly: null },
+    neon: { fiveHour: null, weekly: null },
     updatedAt: 0,
   };
   try {
@@ -789,6 +791,7 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
       if (parsed && typeof parsed === 'object') {
         quotaState = { ...quotaState, ...parsed };
         if (quotaState.argon) quotaState.argon.fiveHour = null;
+        if (!quotaState.neon) quotaState.neon = { fiveHour: null, weekly: null };
       }
     } else {
       const oldQ = g.localStorage?.getItem('agy_ko_quota_summary_v1');
@@ -820,6 +823,7 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
   function classifyQuotaGroup(name) {
     const s = String(name || '').toLowerCase();
     if (s.includes('argon')) return 'argon';
+    if (s.includes('neon')) return 'neon';
     if (s.includes('claude') || s.includes('gpt')) return 'claude';
     if (s.includes('gemini')) return 'gemini';
     return null;
@@ -851,9 +855,29 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
         obj?.result?.response?.groups;
       if (!Array.isArray(groups) || groups.length === 0) return false;
       let updated = false;
+      let sawNeonGroup = false;
+      const snapGroups = [];
       for (const grp of groups) {
+        if (grp?.displayName) {
+          snapGroups.push({
+            displayName: grp.displayName,
+            buckets: (grp.buckets || []).map((b) => ({
+              window: b?.window,
+              displayName: b?.displayName,
+              remainingFraction:
+                typeof b?.remainingFraction === 'number'
+                  ? b.remainingFraction
+                  : b?.remaining?.case === 'remainingFraction'
+                  ? b.remaining.value
+                  : null,
+              resetTime: b?.resetTime || null,
+            })),
+          });
+        }
         const gKey = classifyQuotaGroup(grp?.displayName);
         if (!gKey || !Array.isArray(grp?.buckets)) continue;
+        if (gKey === 'neon') sawNeonGroup = true;
+        if (!quotaState[gKey]) quotaState[gKey] = { fiveHour: null, weekly: null };
         for (const b of grp.buckets) {
           let bKey = classifyQuotaBucket(b?.window || b?.displayName || b?.bucketId);
           if (gKey === 'argon') {
@@ -879,6 +903,17 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
           }
         }
       }
+      if (!sawNeonGroup && quotaState.neon && (quotaState.neon.fiveHour !== null || quotaState.neon.weekly !== null)) {
+        quotaState.neon = { fiveHour: null, weekly: null };
+        updated = true;
+      }
+      try {
+        const prevSnap = JSON.parse(g.localStorage?.getItem(QUOTA_GROUPS_SNAP_KEY) || '{}');
+        g.localStorage?.setItem(
+          QUOTA_GROUPS_SNAP_KEY,
+          JSON.stringify({ ...prevSnap, groups: snapGroups, updatedAt: Date.now() })
+        );
+      } catch (_) {}
       quotaState.argon.fiveHour = null;
       if (updated) {
         quotaState.updatedAt = Date.now();
@@ -907,16 +942,20 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
         const txt = (el.textContent || '').trim();
         if (!txt) continue;
 
+        if (/^(Gemini\s*4\s*Argon|Argon(?:\s+단독\s*한도|\s*\(단독\s*한도\)|\s+Standalone)?)$/i.test(txt)) {
+          currentGroup = 'argon';
+          continue;
+        }
+        if (/^(Gemini\s*4\s*Neon|Neon(?:\s+단독\s*한도|\s*\(단독\s*한도\)|\s+Standalone)?)$/i.test(txt)) {
+          currentGroup = 'neon';
+          continue;
+        }
         if (/^(Gemini(?:\s+Models|\s+모델)?)$/i.test(txt)) {
           currentGroup = 'gemini';
           continue;
         }
         if (/^(Claude\s*(?:&|and|및)\s*GPT(?:\s*Models|\s*모델)?)$/i.test(txt)) {
           currentGroup = 'claude';
-          continue;
-        }
-        if (/^(Gemini\s*4\s*Argon|Argon(?:\s+단독\s*한도|\s*\(단독\s*한도\)|\s+Standalone)?)$/i.test(txt)) {
-          currentGroup = 'argon';
           continue;
         }
 
@@ -1184,6 +1223,16 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
                 const isQuota = quotaStreams.has(msg.streamId) || manualStreams.has(msg.streamId) || Boolean(msg.payload?.response?.groups);
                 if (isQuota) {
                   window.postMessage({ type: 'AGY_KO_QUOTA_DATA', payload: msg.payload }, '*');
+                } else {
+                  const cfgs = msg.payload?.userStatus?.cascadeModelConfigData?.clientModelConfigs || msg.payload?.cascadeModelConfigData?.clientModelConfigs || msg.payload?.response?.clientModelConfigs;
+                  if (Array.isArray(cfgs) && cfgs.length > 0) {
+                    const summary = cfgs.map((c) => ({
+                      label: c?.label,
+                      modelId: c?.modelId,
+                      quotaInfo: c?.quotaInfo || null,
+                    }));
+                    window.postMessage({ type: 'AGY_KO_MODEL_CONFIGS', payload: summary }, '*');
+                  }
                 }
               } else if (msg.type === 'end') {
                 quotaStreams.delete(msg.streamId);
@@ -1444,6 +1493,14 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
       if (e?.data?.type === 'AGY_KO_QUOTA_DATA' && e.data.payload) {
         parseQuotaResponseObj(e.data.payload);
         finishQuotaRefresh();
+      } else if (e?.data?.type === 'AGY_KO_MODEL_CONFIGS' && Array.isArray(e.data.payload)) {
+        try {
+          const prevSnap = JSON.parse(g.localStorage?.getItem(QUOTA_GROUPS_SNAP_KEY) || '{}');
+          g.localStorage?.setItem(
+            QUOTA_GROUPS_SNAP_KEY,
+            JSON.stringify({ ...prevSnap, models: e.data.payload, modelsAt: Date.now() })
+          );
+        } catch (_) {}
       } else if (e?.data?.type === 'AGY_KO_QUOTA_FETCH_DONE') {
         finishQuotaRefresh();
       }
@@ -1487,6 +1544,9 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
       }
       rays.push(`<circle cx="16" cy="16" r="1.8" fill="currentColor" opacity="0.88"/>`);
       return rays.join('');
+    }
+    if (key === 'neon') {
+      return `<text x="16" y="16.6" text-anchor="middle" dominant-baseline="central" fill="currentColor" opacity="0.9" style="font-size:9.5px;font-weight:800;font-family:var(--agy-ko-font-sans),system-ui,sans-serif;letter-spacing:-0.03em;">Ne</text>`;
     }
     // Argon chemical element symbol "Ar"
     return `<text x="16" y="16.6" text-anchor="middle" dominant-baseline="central" fill="currentColor" opacity="0.9" style="font-size:9.5px;font-weight:800;font-family:var(--agy-ko-font-sans),system-ui,sans-serif;letter-spacing:-0.03em;">Ar</text>`;
@@ -1570,21 +1630,8 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
         parent.insertBefore(bar, settingsBtn);
       }
 
-      const sig = JSON.stringify({
-        g5: quotaState.gemini.fiveHour,
-        gw: quotaState.gemini.weekly,
-        c5: quotaState.claude.fiveHour,
-        cw: quotaState.claude.weekly,
-        a5: quotaState.argon.fiveHour,
-        aw: quotaState.argon.weekly,
-        en: enabled,
-        ref: isQuotaRefreshing,
-      });
-      if (bar.getAttribute('data-sig') === sig && bar.childElementCount === 4) {
-        return;
-      }
-      bar.setAttribute('data-sig', sig);
-
+      const hasStandaloneNeon =
+        typeof quotaState.neon?.fiveHour === 'number' || typeof quotaState.neon?.weekly === 'number';
       const specs = [
         {
           key: 'gemini',
@@ -1611,6 +1658,33 @@ function installRendererLocalization(ipcRenderer, contextBridge, inlineDict) {
           weekly: quotaState.argon.weekly,
         },
       ];
+      if (hasStandaloneNeon) {
+        specs.push({
+          key: 'neon',
+          titleKo: 'Neon 단독',
+          titleEn: 'Neon',
+          hasFiveHour: typeof quotaState.neon?.fiveHour === 'number',
+          fiveHour: quotaState.neon.fiveHour,
+          weekly: quotaState.neon.weekly,
+        });
+      }
+
+      const sig = JSON.stringify({
+        g5: quotaState.gemini.fiveHour,
+        gw: quotaState.gemini.weekly,
+        c5: quotaState.claude.fiveHour,
+        cw: quotaState.claude.weekly,
+        a5: quotaState.argon.fiveHour,
+        aw: quotaState.argon.weekly,
+        n5: quotaState.neon?.fiveHour ?? null,
+        nw: quotaState.neon?.weekly ?? null,
+        en: enabled,
+        ref: isQuotaRefreshing,
+      });
+      if (bar.getAttribute('data-sig') === sig && bar.childElementCount === specs.length + 1) {
+        return;
+      }
+      bar.setAttribute('data-sig', sig);
 
       const r = 11.5;
       const cx = 16;

@@ -214,41 +214,48 @@ function installMainLocalization() {
       if (process.platform === 'win32') {
         const esc = (s) => String(s).replace(/'/g, "''");
         const relaunchLine = relaunchAfterPatch
-          ? 'if (-not (Get-Process -Name "Antigravity" -ErrorAction SilentlyContinue)) { Start-Process -FilePath $exe }'
+          ? 'Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue; if (-not (Get-Process -Name "Antigravity" -ErrorAction SilentlyContinue)) { Start-Process -FilePath $exe }'
           : '';
         const psScript = [
           `$asar = '${esc(asarPath)}'`,
           `$exe = '${esc(agyExe)}'`,
           `$patch = '${esc(patchJs)}'`,
           `$dir = '${esc(meta.appDir)}'`,
-          'for ($i = 0; $i -lt 240; $i++) {',
-          '  Start-Sleep -Milliseconds 500',
-          '  $unpatched = $false',
-          '  try {',
-          '    $fs = [System.IO.File]::Open($asar, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)',
+          'try {',
+          '  for ($i = 0; $i -lt 240; $i++) {',
+          '    Start-Sleep -Milliseconds 500',
+          '    $unpatched = $false',
           '    try {',
-          '      $lenBuf = New-Object byte[] 16',
-          '      $null = $fs.Read($lenBuf, 0, 16)',
-          '      $hdrSize = [System.BitConverter]::ToInt32($lenBuf, 12)',
-          '      if ($hdrSize -gt 0 -and $hdrSize -lt 10485760) {',
-          '        $hdrBuf = New-Object byte[] $hdrSize',
-          '        $null = $fs.Read($hdrBuf, 0, $hdrSize)',
-          '        $hdrStr = [System.Text.Encoding]::UTF8.GetString($hdrBuf)',
-          '        if ($hdrStr -notmatch "ko-meta\\.json") { $unpatched = $true }',
+          '      $fs = [System.IO.File]::Open($asar, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)',
+          '      try {',
+          '        $lenBuf = New-Object byte[] 16',
+          '        $null = $fs.Read($lenBuf, 0, 16)',
+          '        $hdrSize = [System.BitConverter]::ToInt32($lenBuf, 12)',
+          '        if ($hdrSize -gt 0 -and $hdrSize -lt 10485760) {',
+          '          $hdrBuf = New-Object byte[] $hdrSize',
+          '          $null = $fs.Read($hdrBuf, 0, $hdrSize)',
+          '          $hdrStr = [System.Text.Encoding]::UTF8.GetString($hdrBuf)',
+          '          if ($hdrStr -notmatch "ko-meta\\.json") { $unpatched = $true }',
+          '        }',
+          '      } finally { $fs.Dispose() }',
+          '    } catch {}',
+          '    if ($unpatched) {',
+          '      for ($w = 0; $w -lt 40; $w++) {',
+          '        if (-not (Get-Process -Name "Antigravity-x64*" -ErrorAction SilentlyContinue)) { break }',
+          '        Start-Sleep -Milliseconds 250',
           '      }',
-          '    } finally { $fs.Dispose() }',
-          '  } catch {}',
-          '  if ($unpatched) {',
-          '    for ($w = 0; $w -lt 40; $w++) {',
-          '      if (-not (Get-Process -Name "Antigravity-x64*" -ErrorAction SilentlyContinue)) { break }',
-          '      Start-Sleep -Milliseconds 250',
+          '      Start-Sleep -Milliseconds 300',
+          '      $env:ELECTRON_RUN_AS_NODE = "1"',
+          '      try {',
+          '        $null = Start-Process -FilePath $exe -ArgumentList @($patch, "ensure", "--quiet", "--app-dir", $dir) -Wait -PassThru -WindowStyle Hidden',
+          '      } finally {',
+          '        Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue',
+          '      }',
+          '      break',
           '    }',
-          '    Start-Sleep -Milliseconds 300',
-          '    $env:ELECTRON_RUN_AS_NODE = "1"',
-          '    $p = Start-Process -FilePath $exe -ArgumentList @($patch, "ensure", "--quiet", "--app-dir", $dir) -Wait -PassThru -WindowStyle Hidden',
-          relaunchLine,
-          '    break',
           '  }',
+          '} finally {',
+          relaunchLine,
           '}',
         ].filter(Boolean).join('\n');
         const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
@@ -275,7 +282,8 @@ function installMainLocalization() {
           eu.autoUpdater.quitAndInstall = function (isSilent, _isForceRunAfter) {
             schedulePostUpdateRepatch(true);
             try { eu.autoUpdater.autoRunAppAfterInstall = false; } catch (_) {}
-            return origQai(Boolean(isSilent), false);
+            const silentFlag = process.platform === 'win32' ? true : Boolean(isSilent);
+            return origQai(silentFlag, false);
           };
         }
       }
